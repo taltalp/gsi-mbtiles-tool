@@ -94,4 +94,4 @@ earthhillshade: 4.744s
 
 このリポジトリに含まれるソースコードのライセンスは MIT としますが、成果物のタイルをご利用になる場合は、測量法第２９条（複製）、第３０条（使用）に基づき国土地理院長への承認申請が必要になる可能性がありますので、ご注意ください。
 
-https://www.gsi.go.jp/LAW/2930-index.html
+<https://www.gsi.go.jp/LAW/2930-index.html>
