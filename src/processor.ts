@@ -50,7 +50,7 @@ type MokurokuResp =
     };
 
 async function getMokuroku(ctx: ProcessorCtx): Promise<MokurokuResp> {
-  const { mokurokuId, minZoom, maxZoom } = ctx;
+  const { mokurokuId, minZoom, maxZoom, db, inputLastModified } = ctx;
   const url = `https://cyberjapandata.gsi.go.jp/xyz/${mokurokuId}/mokuroku.csv.gz`;
   const resp = await request(url);
 
@@ -58,31 +58,67 @@ async function getMokuroku(ctx: ProcessorCtx): Promise<MokurokuResp> {
     throw new Error(`HTTP ${resp.statusCode} for ${url}`);
   }
 
+  console.log(
+    `[CSV Parser] Downloaded mokuroku.csv.gz, size: ${resp.headers["content-length"]}`
+  );
+
   const lastModifiedStr = resp.headers["last-modified"];
   const lastModified = lastModifiedStr
     ? new Date(lastModifiedStr as string)
     : new Date();
 
-  if (
-    ctx.inputLastModified &&
-    lastModified <= new Date(ctx.inputLastModified)
-  ) {
+  if (inputLastModified && lastModified <= new Date(inputLastModified)) {
     return {
       status: "upToDate",
     };
   }
 
-  const rows: MokurokuArray = [];
+  // 一時テーブルを作成して、CSVの行を逐次書き込み（メモリに全件保持しない）
+  db.exec(`
+        CREATE TEMP TABLE temp_mokuroku (
+          tile_ref TEXT,
+          updated INTEGER,
+          tile_size INTEGER,
+          md5 TEXT
+        );
+      `);
+
+  const insertStmt = db.prepare(`
+        INSERT INTO temp_mokuroku (tile_ref, updated, tile_size, md5)
+        VALUES (?, ?, ?, ?)
+      `);
+
   const csvParser = csvParse();
   const pipelinePromise = pipeline(resp.body, zlib.createGunzip(), csvParser);
 
+  // CSVの各行を処理し、条件に合致する行だけをDBにINSERT
+  let processedCount = 0;
   for await (const row of csvParser) {
+    processedCount++;
+    if (processedCount % 10000 === 0) {
+      console.log(
+        `[CSV Parser] Processed ${processedCount} rows in 53692365 rows (${(
+          (processedCount / 53692365) *
+          100
+        ).toFixed(2)}%)`
+      );
+    }
     const zoom = parseInt(row[0].split("/", 2)[0], 10);
     if (zoom >= minZoom && zoom <= maxZoom) {
-      rows.push(row);
+      insertStmt.run(
+        row[0],
+        parseInt(row[1], 10),
+        parseInt(row[2], 10),
+        row[3]
+      );
     }
   }
   await pipelinePromise;
+
+  // 必要なデータは一時テーブルから取得（この時点でSQLite側で絞り込み・メモリ管理されるため、JS側のメモリ消費は抑えられます）
+  const rows: MokurokuArray = db
+    .prepare("SELECT tile_ref, updated, tile_size, md5 FROM temp_mokuroku")
+    .all() as MokurokuArray;
 
   return {
     status: "needsUpdate",
